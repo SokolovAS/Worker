@@ -3,71 +3,75 @@ package main
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-const defaultWorkersCount = 2
+func worker(count *int32, tasksCh <-chan func()) {
+	min := 2
 
-func worker(tasksCh <-chan int, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for {
-		task, ok := <-tasksCh
-		if !ok {
-			return
-		}
-		d := time.Duration(task) * time.Millisecond
-		time.Sleep(d)
-		fmt.Println("processing task", task)
-	}
-}
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		atomic.AddInt32(count, 1)
+		wg.Done()
+	}()
+	wg.Wait()
 
-func pool(wg *sync.WaitGroup, dch chan int, lch chan int) {
-	tasksCh := make(chan int)
+	tick := time.Tick(2 * time.Second)
 
 	for {
 		select {
-		case task := <-lch:
-			fmt.Println("in additional load")
-			go worker(tasksCh, wg)
-			tasksCh <- task
-		case task := <-dch:
-			fmt.Println("in default loads")
-			go worker(tasksCh, wg)
-
-			tasksCh <- task
-
-			wg.Done()
+		case t := <-tasksCh:
+			fmt.Println("processing task")
+			t()
+			fmt.Println("Done!")
+		case <-tick:
+			fmt.Println("Tick!")
+			fmt.Println("atomic.LoadInt32(count)", atomic.LoadInt32(count))
+			fmt.Println("int32(min)", int32(min))
+			if atomic.LoadInt32(count) <= int32(min) {
+				continue
+			} else {
+				//need decrease count
+				return
+			}
 		}
 	}
 }
 
-func increaseLoads(tasks int, ch chan int) {
-	for i := 37; i < tasks; i++ {
-		ch <- i
-	}
-}
+func NewWP(ch chan int) {
+	var actualWorkersCount int32
+	max := 10
 
-func defaultLoads(tasks int, ch chan int) {
-	for i := 0; i < tasks; i++ {
-		ch <- i
+	tasksCh := make(chan func())
+
+	for {
+		select {
+		case <-ch:
+			fmt.Println("actualWorkersCount", atomic.LoadInt32(&actualWorkersCount))
+			if atomic.LoadInt32(&actualWorkersCount) < int32(max) {
+				fmt.Println("make worker")
+				go worker(&actualWorkersCount, tasksCh)
+				tasksCh <- func() {
+					time.Sleep(time.Second)
+				}
+			}
+			continue
+		}
 	}
 }
 
 func main() {
-	var defaultTasks = 36
-	var additionalTasks = 57
+	tasks := 100
 
-	highLoadCh := make(chan int)
-	defaultLoadCh := make(chan int)
+	ch := make(chan int)
+	go NewWP(ch)
 
-	t := time.Now()
-	var wg sync.WaitGroup
-	wg.Add(defaultWorkersCount + additionalTasks)
-	go pool(&wg, defaultLoadCh, highLoadCh)
-	go defaultLoads(defaultTasks, defaultLoadCh)
-	go increaseLoads(additionalTasks, highLoadCh)
-	wg.Wait()
-	t1 := time.Now()
-	dif := t1.Sub(t)
-	fmt.Println(dif)
+	for i := 0; i < tasks; i++ {
+		//time.Sleep(100 * time.Millisecond)
+		ch <- i
+	}
+
+	time.Sleep(30 * time.Second)
 }
