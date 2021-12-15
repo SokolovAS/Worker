@@ -1,22 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 )
 
-func worker(count *int32, tasksCh <-chan func()) {
-	min := 2
+type Worker struct {
+	min, max int
+}
 
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		atomic.AddInt32(count, 1)
-		wg.Done()
-	}()
-	wg.Wait()
+func worker(ctx context.Context, count *int32, tasksCh <-chan func(), w Worker) {
+	atomic.AddInt32(count, 1)
 
 	tick := time.Tick(2 * time.Second)
 
@@ -29,49 +25,55 @@ func worker(count *int32, tasksCh <-chan func()) {
 		case <-tick:
 			fmt.Println("Tick!")
 			fmt.Println("atomic.LoadInt32(count)", atomic.LoadInt32(count))
-			fmt.Println("int32(min)", int32(min))
-			if atomic.LoadInt32(count) <= int32(min) {
+			fmt.Println("int32(min)", int32(w.min))
+			if atomic.LoadInt32(count) <= int32(w.min) {
 				continue
 			} else {
-				//need decrease count
+				atomic.AddInt32(count, -1)
 				return
 			}
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
-func NewWP(ch chan int) {
+func NewWP(ctx context.Context, ch chan func()) {
 	var actualWorkersCount int32
-	max := 10
+	w := Worker{3, 10}
 
 	tasksCh := make(chan func())
-
 	for {
 		select {
-		case <-ch:
-			fmt.Println("actualWorkersCount", atomic.LoadInt32(&actualWorkersCount))
-			if atomic.LoadInt32(&actualWorkersCount) < int32(max) {
-				fmt.Println("make worker")
-				go worker(&actualWorkersCount, tasksCh)
-				tasksCh <- func() {
-					time.Sleep(time.Second)
+		case t := <-ch:
+			select {
+			case tasksCh <- t:
+			case <-time.After(100 * time.Millisecond):
+				fmt.Println("actualWorkersCount", atomic.LoadInt32(&actualWorkersCount))
+				if atomic.LoadInt32(&actualWorkersCount) < int32(w.max) {
+					fmt.Println("make worker")
+					go worker(ctx, &actualWorkersCount, tasksCh, w)
 				}
+				tasksCh <- t
 			}
-			continue
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
 func main() {
 	tasks := 100
+	ch := make(chan func())
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
 
-	ch := make(chan int)
-	go NewWP(ch)
-
+	go NewWP(ctx, ch)
 	for i := 0; i < tasks; i++ {
-		//time.Sleep(100 * time.Millisecond)
-		ch <- i
+		ch <- func() {
+			time.Sleep(time.Second)
+		}
 	}
-
-	time.Sleep(30 * time.Second)
+	time.Sleep(3 * time.Second)
+	cancel()
 }
